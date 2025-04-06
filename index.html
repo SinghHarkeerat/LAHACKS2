@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Lip Reading & Speech Recognition</title>
+    <title>Real-Time Lip Tracking with Speech Recognition</title>
     <style>
         :root {
             --primary: #4361ee;
@@ -223,13 +223,38 @@
             font-weight: bold;
             color: var(--primary);
         }
+        
+        .lip-stats {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 1rem;
+        }
+        
+        .stat-box {
+            background: #f1f3f5;
+            padding: 0.5rem;
+            border-radius: 5px;
+            text-align: center;
+            flex: 1;
+            margin: 0 0.25rem;
+        }
+        
+        .stat-value {
+            font-weight: bold;
+            color: var(--primary);
+        }
+        
+        .stat-label {
+            font-size: 0.8rem;
+            color: #6c757d;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <header>
-            <h1>Lip Reading & Speech Recognition</h1>
-            <p class="subtitle">Real-time lip movement detection with speech recognition</p>
+            <h1>Real-Time Lip Tracking</h1>
+            <p class="subtitle">With speech recognition and visual feedback</p>
         </header>
         
         <div class="app-grid">
@@ -255,10 +280,25 @@
                     <canvas id="lipMaskCanvas"></canvas>
                 </div>
                 
+                <div class="lip-stats">
+                    <div class="stat-box">
+                        <div class="stat-value" id="opennessValue">0</div>
+                        <div class="stat-label">Openness</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-value" id="speedValue">0</div>
+                        <div class="stat-label">Speed</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-value" id="statusValue">Idle</div>
+                        <div class="stat-label">Status</div>
+                    </div>
+                </div>
+                
                 <div class="threshold-control">
                     <label for="thresholdSlider">Lip Movement Sensitivity</label>
-                    <input type="range" id="thresholdSlider" min="5" max="50" value="20">
-                    <div class="threshold-value">Threshold: <span id="thresholdValue">20</span></div>
+                    <input type="range" id="thresholdSlider" min="5" max="50" value="15">
+                    <div class="threshold-value">Threshold: <span id="thresholdValue">15</span></div>
                 </div>
                 
                 <div class="controls">
@@ -281,7 +321,9 @@
                 </div>
                 
                 <div class="speech-output" id="speechOutput">
-                    <!-- Speech bubbles will be added here -->
+                    <div class="speech-bubble system">
+                        <strong>System:</strong> Application loaded. Click "Start" to begin.
+                    </div>
                 </div>
                 
                 <div class="controls">
@@ -291,6 +333,11 @@
             </div>
         </div>
     </div>
+
+    <!-- MediaPipe and Camera Utils -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js"></script>
 
     <script>
         // DOM Elements
@@ -310,15 +357,26 @@
         const cameraStatusText = document.getElementById('cameraStatusText');
         const speechStatus = document.getElementById('speechStatus');
         const speechStatusText = document.getElementById('speechStatusText');
+        const opennessValue = document.getElementById('opennessValue');
+        const speedValue = document.getElementById('speedValue');
+        const statusValue = document.getElementById('statusValue');
 
         // App State
         let stream = null;
         let isRunning = false;
         let isTalking = false;
-        let lipDistanceThreshold = 20;
+        let lipDistanceThreshold = 15;
         let speechRecognition = null;
         let lastSpeech = '';
-        let model = null;
+        let camera = null;
+        let faceMesh = null;
+        
+        // Lip tracking variables
+        let previousLipDistance = 0;
+        let previousTime = 0;
+        let lipMovementSpeed = 0;
+        let lipOpennessHistory = [];
+        const HISTORY_LENGTH = 5;
         
         // Initialize the app
         async function init() {
@@ -329,37 +387,31 @@
             rephraseBtn.addEventListener('click', rephraseLast);
             thresholdSlider.addEventListener('input', updateThreshold);
             
-            // Load face tracking model
-            await loadModel();
-            
             // Initialize camera
-            initCamera();
-        }
-        
-        // Load face tracking model
-        async function loadModel() {
-            try {
-                // In a real app, you would load a proper model here
-                // For this demo, we'll just simulate it
-                console.log("Loading face tracking model...");
-                await new Promise(resolve => setTimeout(resolve, 1000));
-                console.log("Model loaded");
-            } catch (error) {
-                console.error("Error loading model:", error);
-            }
+            await initCamera();
+            
+            // Initialize Face Mesh
+            initFaceMesh();
         }
         
         // Initialize camera
         async function initCamera() {
             try {
-                stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { 
+                        width: 1280, 
+                        height: 720,
+                        facingMode: 'user' 
+                    },
+                    audio: false
+                });
                 video.srcObject = stream;
                 
                 // Set canvas dimensions to match video
                 video.addEventListener('loadedmetadata', () => {
                     canvas.width = video.videoWidth;
                     canvas.height = video.videoHeight;
-                    lipMaskCanvas.width = 120; // Fixed size for lip mask
+                    lipMaskCanvas.width = 120;
                     lipMaskCanvas.height = 80;
                     
                     updateCameraStatus(true);
@@ -367,172 +419,153 @@
             } catch (error) {
                 console.error("Error accessing camera:", error);
                 updateCameraStatus(false, "Camera access denied");
+                addSpeechBubble("System", "Error: Could not access camera", "system");
             }
         }
         
-        // Start the application
-        function startApp() {
-            if (!stream) {
-                alert("Please allow camera access first");
-                return;
-            }
-            
-            isRunning = true;
-            startBtn.disabled = true;
-            stopBtn.disabled = false;
-            
-            // Start face tracking
-            requestAnimationFrame(trackFace);
-            
-            // Start speech recognition
-            startSpeechRecognition();
-            
-            addSpeechBubble("System", "Application started. Begin speaking...", "system");
-        }
-        
-        // Stop the application
-        function stopApp() {
-            isRunning = false;
-            startBtn.disabled = false;
-            stopBtn.disabled = true;
-            
-            // Stop speech recognition
-            if (speechRecognition) {
-                speechRecognition.stop();
-                updateSpeechStatus(false, "Speech Recognition: Stopped");
-            }
-            
-            addSpeechBubble("System", "Application stopped", "system");
-        }
-        
-        // Clear the speech output
-        function clearOutput() {
-            speechOutput.innerHTML = '';
-        }
-        
-        // Rephrase the last spoken sentence
-        function rephraseLast() {
-            if (!lastSpeech) {
-                addSpeechBubble("System", "No speech to rephrase", "system");
-                return;
-            }
-            
-            // In a real app, you would call an API here
-            // For this demo, we'll just simulate it
-            const rephrased = simulateRephrase(lastSpeech);
-            addSpeechBubble("System", `Rephrased: ${rephrased}`, "system");
-        }
-        
-        // Simulate rephrasing (in a real app, call an API)
-        function simulateRephrase(text) {
-            const rephrases = [
-                `Let me rephrase that: ${text}`,
-                `In other words: ${text.split(' ').reverse().join(' ')}`,
-                `Alternative phrasing: ${text.toLowerCase()}`,
-                `Another way to say this: "${text.replace(/./g, '')} ${text}"`,
-                `Paraphrased version: ${text.slice(0, text.length/2)}...${text.slice(text.length/2)}`
-            ];
-            return rephrases[Math.floor(Math.random() * rephrases.length)];
-        }
-        
-        // Update the lip distance threshold
-        function updateThreshold() {
-            lipDistanceThreshold = parseInt(thresholdSlider.value);
-            thresholdValue.textContent = lipDistanceThreshold;
-        }
-        
-        // Track face and lips
-        function trackFace() {
-            if (!isRunning) return;
-            
-            // Draw video frame to canvas
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            
-            // Simulate face detection (in a real app, use a proper model)
-            const faceRect = {
-                x: canvas.width / 2 - 100,
-                y: canvas.height / 2 - 100,
-                width: 200,
-                height: 250
-            };
-            
-            // Draw face rectangle
-            ctx.strokeStyle = '#00FF00';
-            ctx.lineWidth = 2;
-            ctx.strokeRect(faceRect.x, faceRect.y, faceRect.width, faceRect.height);
-            
-            // Simulate lip points (in a real app, detect actual lip landmarks)
-            const lipPoints = [];
-            const lipCenterX = faceRect.x + faceRect.width / 2;
-            const lipCenterY = faceRect.y + faceRect.height * 0.7;
-            const lipWidth = 80;
-            const lipHeight = 40;
-            
-            // Generate lip points in a rough oval shape
-            for (let i = 0; i < 12; i++) {
-                const angle = (i / 12) * Math.PI * 2;
-                const x = lipCenterX + Math.cos(angle) * lipWidth / 2;
-                const y = lipCenterY + Math.sin(angle) * lipHeight / 2;
-                lipPoints.push({x, y});
-                
-                // Draw lip points
-                ctx.fillStyle = '#FF0000';
-                ctx.beginPath();
-                ctx.arc(x, y, 3, 0, Math.PI * 2);
-                ctx.fill();
-            }
-            
-            // Calculate lip distance (simulated)
-            const topLip = lipPoints[3].y;
-            const bottomLip = lipPoints[9].y;
-            const lipDistance = bottomLip - topLip;
-            
-            // Determine if talking based on threshold
-            const wasTalking = isTalking;
-            isTalking = lipDistance > lipDistanceThreshold;
-            
-            // Visual feedback for talking state
-            ctx.fillStyle = isTalking ? 'rgba(0, 255, 0, 0.3)' : 'rgba(255, 0, 0, 0.3)';
-            ctx.fillRect(faceRect.x, faceRect.y, faceRect.width, faceRect.height);
-            
-            // Draw lip distance text
-            ctx.fillStyle = '#FFFFFF';
-            ctx.font = '20px Arial';
-            ctx.fillText(`Lip Distance: ${lipDistance.toFixed(1)}`, 20, 40);
-            ctx.fillText(`Threshold: ${lipDistanceThreshold}`, 20, 70);
-            ctx.fillText(`Status: ${isTalking ? 'TALKING' : 'NOT TALKING'}`, 20, 100);
-            
-            // Extract and display lip region
-            extractLipRegion(lipPoints);
-            
-            // Continue tracking
-            requestAnimationFrame(trackFace);
-        }
-        
-        // Extract and display the lip region
-        function extractLipRegion(lipPoints) {
-            // Find bounding box of lips
-            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-            lipPoints.forEach(point => {
-                minX = Math.min(minX, point.x);
-                minY = Math.min(minY, point.y);
-                maxX = Math.max(maxX, point.x);
-                maxY = Math.max(maxY, point.y);
+        // Initialize Face Mesh
+        function initFaceMesh() {
+            faceMesh = new FaceMesh({
+                locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
             });
             
-            // Add some padding
+            faceMesh.setOptions({
+                maxNumFaces: 1,
+                refineLandmarks: true,
+                minDetectionConfidence: 0.5,
+                minTrackingConfidence: 0.5
+            });
+            
+            faceMesh.onResults(onFaceMeshResults);
+        }
+        
+        // Process Face Mesh results
+        function onFaceMeshResults(results) {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            if (!isRunning) return;
+            
+            // Draw camera feed
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            
+            if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
+                const landmarks = results.multiFaceLandmarks[0];
+                
+                // Get lip landmarks (MediaPipe lip indices)
+                const lipLandmarks = [
+                    // Outer lips (clockwise)
+                    61, 185, 40, 39, 37, 0, 267, 269, 270, 409,
+                    // Inner lips (clockwise)
+                    78, 191, 80, 81, 82, 13, 312, 311, 310, 415
+                ];
+                
+                // Calculate mouth openness (using top and bottom inner lips)
+                const upperLip = landmarks[13];  // Top inner lip
+                const lowerLip = landmarks[14];   // Bottom inner lip
+                const lipDistance = Math.abs(lowerLip.y - upperLip.y) * canvas.height;
+                
+                // Calculate lip movement speed
+                const now = performance.now();
+                if (previousTime > 0) {
+                    const timeDelta = (now - previousTime) / 1000; // in seconds
+                    const distanceDelta = Math.abs(lipDistance - previousLipDistance);
+                    lipMovementSpeed = timeDelta > 0 ? distanceDelta / timeDelta : 0;
+                }
+                previousLipDistance = lipDistance;
+                previousTime = now;
+                
+                // Update lip openness history
+                lipOpennessHistory.push(lipDistance);
+                if (lipOpennessHistory.length > HISTORY_LENGTH) {
+                    lipOpennessHistory.shift();
+                }
+                
+                // Determine talking state
+                const wasTalking = isTalking;
+                isTalking = lipDistance > lipDistanceThreshold && lipMovementSpeed > 5;
+                
+                // Update UI
+                opennessValue.textContent = lipDistance.toFixed(1);
+                speedValue.textContent = lipMovementSpeed.toFixed(1);
+                statusValue.textContent = isTalking ? "Talking" : "Idle";
+                statusValue.style.color = isTalking ? "#4cc9f0" : "#6c757d";
+                
+                // Visual feedback
+                if (isTalking) {
+                    ctx.fillStyle = 'rgba(0, 255, 0, 0.2)';
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                }
+                
+                // Draw lip landmarks
+                drawLipLandmarks(landmarks, lipLandmarks);
+                
+                // Extract and enhance lip region
+                extractLipRegion(landmarks, lipLandmarks);
+            }
+        }
+        
+        // Draw lip landmarks
+        function drawLipLandmarks(landmarks, indices) {
+            ctx.strokeStyle = 'yellow';
+            ctx.lineWidth = 2;
+            
+            // Draw outer lip contour
+            ctx.beginPath();
+            for (let i = 0; i < 10; i++) {
+                const point = landmarks[indices[i]];
+                const x = point.x * canvas.width;
+                const y = point.y * canvas.height;
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.closePath();
+            ctx.stroke();
+            
+            // Draw inner lip contour
+            ctx.beginPath();
+            for (let i = 10; i < 20; i++) {
+                const point = landmarks[indices[i]];
+                const x = point.x * canvas.width;
+                const y = point.y * canvas.height;
+                if (i === 10) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.closePath();
+            ctx.stroke();
+            
+            // Draw individual points
+            ctx.fillStyle = 'red';
+            for (let i = 0; i < indices.length; i++) {
+                const point = landmarks[indices[i]];
+                const x = point.x * canvas.width;
+                const y = point.y * canvas.height;
+                ctx.beginPath();
+                ctx.arc(x, y, 2, 0, 2 * Math.PI);
+                ctx.fill();
+            }
+        }
+        
+        // Extract and enhance lip region
+        function extractLipRegion(landmarks, indices) {
+            // Find bounding box of lips
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            
+            for (let i = 0; i < indices.length; i++) {
+                const point = landmarks[indices[i]];
+                minX = Math.min(minX, point.x * canvas.width);
+                minY = Math.min(minY, point.y * canvas.height);
+                maxX = Math.max(maxX, point.x * canvas.width);
+                maxY = Math.max(maxY, point.y * canvas.height);
+            }
+            
+            // Add padding
             const padding = 20;
             minX = Math.max(0, minX - padding);
             minY = Math.max(0, minY - padding);
             maxX = Math.min(canvas.width, maxX + padding);
             maxY = Math.min(canvas.height, maxY + padding);
             
-            // Draw lip region on main canvas (for visualization)
-            ctx.strokeStyle = '#FFFF00';
-            ctx.lineWidth = 2;
-            ctx.strokeRect(minX, minY, maxX - minX, maxY - minY);
-            
-            // Draw lip region on lip mask canvas
+            // Clear and draw lip region
             lipCtx.clearRect(0, 0, lipMaskCanvas.width, lipMaskCanvas.height);
             
             // Get image data from the lip region
@@ -548,20 +581,79 @@
             // Draw resized version to lip mask canvas
             lipCtx.drawImage(tempCanvas, 0, 0, lipMaskCanvas.width, lipMaskCanvas.height);
             
-            // Apply some effects to make it look processed
+            // Apply enhancement
+            enhanceLipImage();
+        }
+        
+        // Enhance lip image for better visualization
+        function enhanceLipImage() {
             const imageData = lipCtx.getImageData(0, 0, lipMaskCanvas.width, lipMaskCanvas.height);
             const data = imageData.data;
             
-            // Enhance contrast (simple algorithm)
+            // Simple contrast enhancement
             for (let i = 0; i < data.length; i += 4) {
-                // Make reds more prominent
-                data[i] = Math.min(255, data[i] * 1.2);
-                // Reduce greens and blues
+                // Boost red channel
+                data[i] = Math.min(255, data[i] * 1.4);
+                // Reduce green and blue
                 data[i + 1] = data[i + 1] * 0.7;
                 data[i + 2] = data[i + 2] * 0.7;
+                // Lighten shadows
+                if (data[i] + data[i + 1] + data[i + 2] < 150) {
+                    data[i] += 20;
+                    data[i + 1] += 10;
+                    data[i + 2] += 10;
+                }
             }
             
             lipCtx.putImageData(imageData, 0, 0);
+        }
+        
+        // Start the application
+        function startApp() {
+            if (!stream) {
+                alert("Please allow camera access first");
+                return;
+            }
+            
+            isRunning = true;
+            startBtn.disabled = true;
+            stopBtn.disabled = false;
+            
+            // Start camera processing
+            camera = new Camera(video, {
+                onFrame: async () => {
+                    await faceMesh.send({image: video});
+                },
+                width: video.videoWidth,
+                height: video.videoHeight
+            });
+            camera.start();
+            
+            // Start speech recognition
+            startSpeechRecognition();
+            
+            addSpeechBubble("System", "Application started. Begin speaking...", "system");
+        }
+        
+        // Stop the application
+        function stopApp() {
+            isRunning = false;
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            
+            // Stop camera processing
+            if (camera) {
+                camera.stop();
+                camera = null;
+            }
+            
+            // Stop speech recognition
+            if (speechRecognition) {
+                speechRecognition.stop();
+                updateSpeechStatus(false, "Speech Recognition: Stopped");
+            }
+            
+            addSpeechBubble("System", "Application stopped", "system");
         }
         
         // Start speech recognition
@@ -607,8 +699,6 @@
                 if (finalTranscript) {
                     lastSpeech = finalTranscript;
                     addSpeechBubble("You", finalTranscript, "user");
-                } else if (interimTranscript) {
-                    // You could show interim results differently if desired
                 }
             };
             
@@ -622,6 +712,41 @@
             bubble.innerHTML = `<strong>${speaker}:</strong> ${text}`;
             speechOutput.appendChild(bubble);
             speechOutput.scrollTop = speechOutput.scrollHeight;
+        }
+        
+        // Clear the speech output
+        function clearOutput() {
+            speechOutput.innerHTML = '';
+        }
+        
+        // Rephrase the last spoken sentence
+        function rephraseLast() {
+            if (!lastSpeech) {
+                addSpeechBubble("System", "No speech to rephrase", "system");
+                return;
+            }
+            
+            // In a real app, you would call an API here
+            const rephrased = simulateRephrase(lastSpeech);
+            addSpeechBubble("System", `Rephrased: ${rephrased}`, "system");
+        }
+        
+        // Simulate rephrasing (in a real app, call an API)
+        function simulateRephrase(text) {
+            const rephrases = [
+                `Let me rephrase that: ${text}`,
+                `In other words: ${text.split(' ').reverse().join(' ')}`,
+                `Alternative phrasing: ${text.toLowerCase()}`,
+                `Another way to say this: "${text.replace(/./g, '')} ${text}"`,
+                `Paraphrased version: ${text.slice(0, text.length/2)}...${text.slice(text.length/2)}`
+            ];
+            return rephrases[Math.floor(Math.random() * rephrases.length)];
+        }
+        
+        // Update the lip distance threshold
+        function updateThreshold() {
+            lipDistanceThreshold = parseInt(thresholdSlider.value);
+            thresholdValue.textContent = lipDistanceThreshold;
         }
         
         // Update camera status indicator
