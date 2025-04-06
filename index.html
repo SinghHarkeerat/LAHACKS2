@@ -658,13 +658,15 @@
         
         // Start speech recognition
         function startSpeechRecognition() {
-            if (!('webkitSpeechRecognition' in window)) {
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            
+            if (!SpeechRecognition) {
                 updateSpeechStatus(false, "Speech Recognition: Not supported");
                 addSpeechBubble("System", "Speech recognition not supported in your browser", "system");
                 return;
             }
             
-            speechRecognition = new webkitSpeechRecognition();
+            speechRecognition = new SpeechRecognition();
             speechRecognition.continuous = true;
             speechRecognition.interimResults = true;
             
@@ -674,12 +676,26 @@
             
             speechRecognition.onerror = (event) => {
                 updateSpeechStatus(false, `Speech Recognition: Error (${event.error})`);
+                console.error("Speech recognition error:", event.error);
+                
+                // Try to restart if there was an error
+                if (isRunning) {
+                    setTimeout(() => {
+                        if (isRunning) {
+                            speechRecognition.start();
+                        }
+                    }, 1000);
+                }
             };
             
             speechRecognition.onend = () => {
                 if (isRunning) {
                     // Restart recognition if app is still running
-                    speechRecognition.start();
+                    setTimeout(() => {
+                        if (isRunning) {
+                            speechRecognition.start();
+                        }
+                    }, 100);
                 }
             };
             
@@ -699,10 +715,25 @@
                 if (finalTranscript) {
                     lastSpeech = finalTranscript;
                     addSpeechBubble("You", finalTranscript, "user");
+                    
+                    // Check if we're still talking based on lip movement
+                    if (!isTalking) {
+                        addSpeechBubble("System", "Detected speech but no lip movement. Are you speaking?", "system");
+                    }
                 }
+                
+                // Optional: Show interim results
+                // if (interimTranscript) {
+                //     console.log("Interim:", interimTranscript);
+                // }
             };
             
-            speechRecognition.start();
+            try {
+                speechRecognition.start();
+            } catch (e) {
+                console.error("Error starting speech recognition:", e);
+                updateSpeechStatus(false, "Speech Recognition: Error starting");
+            }
         }
         
         // Add a speech bubble to the output
